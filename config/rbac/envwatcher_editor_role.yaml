@@ -1,0 +1,26 @@
+# permissions to do edit envwatchers.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: envwatcher-editor-role
+rules:
+- apiGroups:
+  - lightwatch.vigilant.dev
+  resources:
+  - envwatchers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - lightwatch.vigilant.dev
+  resources:
+  - envwatchers/status
+  verbs:
+  - get
+  - patch
+  - update

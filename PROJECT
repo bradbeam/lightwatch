@@ -1,0 +1,7 @@
+domain: vigilant.dev
+repo: github.com/bradbeam/lightstream
+resources:
+- group: lightwatch
+  kind: EnvWatcher
+  version: v1alpha1
+version: "2"

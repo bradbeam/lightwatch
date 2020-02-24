@@ -1,0 +1,7 @@
+apiVersion: lightwatch.vigilant.dev/v1alpha1
+kind: EnvWatcher
+metadata:
+  name: envwatcher-sample
+spec:
+  # Add fields here
+  foo: bar
