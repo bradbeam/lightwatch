@@ -1,0 +1,18 @@
+kind: pipeline
+name: default
+
+steps:
+- name: setup
+  image: gcr.io/kubebuilder/thirdparty-linux:1.16.4
+  commands:
+    - cp /kubebuilder_linux_amd64.tar.gz $DRONE_WORKSPACE
+
+- name: test
+  image: golang:latest
+  environment:
+    GOFLAGS: -mod=vendor
+  commands:
+    - tar -xf kubebuilder_linux_amd64.tar.gz -C /usr/local
+      # Need to find a better way to do this ( probably should just create a new container for building
+    - GOFLAGS="" make controller-gen
+    - make test

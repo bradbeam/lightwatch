@@ -1,0 +1,71 @@
+
+---
+apiVersion: apiextensions.k8s.io/v1beta1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.2.4
+  creationTimestamp: null
+  name: envwatchers.lightwatch.vigilant.dev
+spec:
+  group: lightwatch.vigilant.dev
+  names:
+    kind: EnvWatcher
+    listKind: EnvWatcherList
+    plural: envwatchers
+    singular: envwatcher
+  scope: Namespaced
+  validation:
+    openAPIV3Schema:
+      description: EnvWatcher is the Schema for the envwatchers API
+      properties:
+        apiVersion:
+          description: 'APIVersion defines the versioned schema of this representation
+            of an object. Servers should convert recognized schemas to the latest
+            internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
+          type: string
+        kind:
+          description: 'Kind is a string value representing the REST resource this
+            object represents. Servers may infer this from the endpoint the client
+            submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
+          type: string
+        metadata:
+          type: object
+        spec:
+          description: EnvWatcherSpec defines the desired state of EnvWatcher
+          properties:
+            frequency:
+              description: Frequency specifies the hourly interval to check for updates
+                to the file.
+              type: string
+            url:
+              description: URL specifies the location of the remote file to fetch.
+                This file should contain key=value pairs to be used for environment
+                variables.
+              type: string
+          required:
+          - url
+          type: object
+        status:
+          description: EnvWatcherStatus defines the observed state of EnvWatcher
+          properties:
+            checksum:
+              type: string
+            lastcheck:
+              description: LastCheck is a timestamp representing the last time this
+                resource was fetched/checked.
+              format: int64
+              type: integer
+          type: object
+      type: object
+  version: v1alpha1
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+status:
+  acceptedNames:
+    kind: ""
+    plural: ""
+  conditions: []
+  storedVersions: []

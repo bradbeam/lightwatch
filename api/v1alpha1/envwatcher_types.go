@@ -22,20 +22,25 @@ import (
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// Important: Run "make" to regenerate code after modifying this file
 
 // EnvWatcherSpec defines the desired state of EnvWatcher
 type EnvWatcherSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// Foo is an example field of EnvWatcher. Edit EnvWatcher_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
+	// URL specifies the location of the remote file to fetch. This file
+	// should contain key=value pairs to be used for environment variables.
+	URL string `json:"url"`
+	// Frequency specifies the hourly interval to check for updates to
+	// the file.
+	Frequency string `json:"frequency,omitempty"`
 }
 
 // EnvWatcherStatus defines the observed state of EnvWatcher
 type EnvWatcherStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+
+	// LastCheck is a timestamp representing the last time this resource
+	// was fetched/checked.
+	LastCheck int64  `json:"lastcheck,omitempty"`
+	Checksum  string `json:"checksum,omitempty"`
 }
 
 // +kubebuilder:object:root=true
