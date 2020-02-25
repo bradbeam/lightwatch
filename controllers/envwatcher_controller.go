@@ -55,6 +55,8 @@ type EnvWatcherReconciler struct {
 
 // +kubebuilder:rbac:groups=lightwatch.vigilant.dev,resources=envwatchers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=lightwatch.vigilant.dev,resources=envwatchers/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=configmaps/status,verbs=get;update;patch
 
 func (r *EnvWatcherReconciler) Reconcile(req ctrl.Request) (res ctrl.Result, err error) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -141,13 +143,51 @@ func (r *EnvWatcherReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *EnvWatcherReconciler) watcher(ctx context.Context, eWatch *lightwatchv1alpha1.EnvWatcher) error {
-	// download file
+func (r *EnvWatcherReconciler) watcher(ctx context.Context, eWatch *lightwatchv1alpha1.EnvWatcher) {
+	period, err := time.ParseDuration(eWatch.Spec.Frequency)
+	if err != nil {
+		r.Log.Error(err, "failed to parse frequency", "frequency", eWatch.Spec.Frequency)
+		return
+	}
+
+	// This means now() is after last check + 1h
+	if time.Now().After(time.Unix(eWatch.Status.LastCheck, 0).Add(period)) {
+		r.doStuff(ctx, eWatch)
+	} else {
+		// Wait difference between now and next iteration
+		<-time.After(time.Now().Sub(time.Unix(eWatch.Status.LastCheck, 0).Add(period)))
+		r.doStuff(ctx, eWatch)
+	}
+
+	// instantiate a new ticker
+	watcherTicker := time.NewTicker(period)
+	defer watcherTicker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-watcherTicker.C:
+			r.doStuff(ctx, eWatch)
+		}
+	}
+}
+
+func (r *EnvWatcherReconciler) doStuff(ctx context.Context, eWatch *lightwatchv1alpha1.EnvWatcher) {
 	var (
+		data           []byte
 		err            error
 		namespacedName = types.NamespacedName{Name: eWatch.ObjectMeta.Name, Namespace: eWatch.ObjectMeta.Namespace}
-		period         time.Duration
 	)
+
+	if data, err = downloadFile(eWatch.Spec.URL); err != nil {
+		r.Log.Error(err, "failed to download file", "url", eWatch.Spec.URL)
+		return
+	}
+
+	remoteChecksum := checksumData(data)
+
+	eWatch.Status.LastCheck = time.Now().Unix()
 
 	// discover configmap
 	cfgMap := &corev1.ConfigMap{}
@@ -164,76 +204,33 @@ func (r *EnvWatcherReconciler) watcher(ctx context.Context, eWatch *lightwatchv1
 
 			if err = r.Create(ctx, cfgMap); err != nil {
 				r.Log.Error(err, "failed to create configmap", "configmap", namespacedName)
-				return err
+				return
 			}
 		} else {
 			r.Log.Error(err, "failed to find configmap", "configmap", namespacedName)
-			return err
-		}
-	}
-
-	if period, err = time.ParseDuration(eWatch.Spec.Frequency); err != nil {
-		r.Log.Error(err, "failed to parse frequency", "frequency", eWatch.Spec.Frequency)
-		return err
-	}
-
-	// This means now() is after last check + 1h
-	if time.Now().After(time.Unix(eWatch.Status.LastCheck, 0).Add(period)) {
-		r.doStuff(ctx, eWatch, cfgMap)
-	} else {
-		// Wait difference between now and next iteration
-		<-time.After(time.Now().Sub(time.Unix(eWatch.Status.LastCheck, 0).Add(period)))
-		r.doStuff(ctx, eWatch, cfgMap)
-	}
-
-	// instantiate a new ticker
-	watcherTicker := time.NewTicker(period)
-	defer watcherTicker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-watcherTicker.C:
-			r.doStuff(ctx, eWatch, cfgMap)
-		}
-	}
-}
-
-func (r *EnvWatcherReconciler) doStuff(ctx context.Context, eWatch *lightwatchv1alpha1.EnvWatcher, cfgMap *corev1.ConfigMap) {
-	var (
-		data []byte
-		err  error
-	)
-
-	if data, err = downloadFile(eWatch.Spec.URL); err != nil {
-		r.Log.Error(err, "failed to download file", "url", eWatch.Spec.URL)
-		return
-	}
-
-	remoteChecksum := checksumData(data)
-
-	eWatch.Status.LastCheck = time.Now().Unix()
-
-	if eWatch.Status.Checksum != remoteChecksum {
-		scanner := bufio.NewScanner(bytes.NewReader(data))
-		for scanner.Scan() {
-			fields := strings.Split(scanner.Text(), "=")
-			cfgMap.Data[fields[0]] = fields[1]
-		}
-		if err := scanner.Err(); err != nil {
-			r.Log.Error(err, "failed to parse downloaded file", "contents", string(data))
 			return
 		}
 	}
 
-	eWatch.Status.Checksum = remoteChecksum
-
-	if err = r.Update(ctx, cfgMap); err != nil {
-		r.Log.Error(err, "failed to update configmap")
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		fields := strings.Split(scanner.Text(), "=")
+		cfgMap.Data[fields[0]] = fields[1]
 	}
-	if err = r.Update(ctx, eWatch); err != nil {
-		r.Log.Error(err, "failed to update env watcher")
+	if err := scanner.Err(); err != nil {
+		r.Log.Error(err, "failed to parse downloaded file", "contents", string(data))
+		return
+	}
+
+	if eWatch.Status.Checksum != remoteChecksum {
+		eWatch.Status.Checksum = remoteChecksum
+		if err = r.Update(ctx, cfgMap); err != nil {
+			r.Log.Error(err, "failed to update configmap")
+		}
+	}
+
+	if err = r.Status().Update(ctx, eWatch); err != nil {
+		r.Log.Error(err, "failed to update env watcher status")
 	}
 }
 

@@ -174,6 +174,12 @@ func (suite *ControllerSuite) TestController() {
 	suite.Assert().Equal(suite.checksum, eWatcher.Status.Checksum)
 	// Verify the last check timestamp was recent ( within last 5 seconds )
 	suite.Assert().LessOrEqual(time.Now().Sub(time.Unix(eWatcher.Status.LastCheck, 0)).Seconds(), float64(5))
+
+	// Deletion
+	/*
+		err = suite.k8sClient.Delete(context.Background(), cfgMap)
+		suite.Assert().NoError(err)
+	*/
 }
 
 func (suite *ControllerSuite) TestDownloadFile() {

@@ -44,6 +44,7 @@ type EnvWatcherStatus struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
 
 // EnvWatcher is the Schema for the envwatchers API
 type EnvWatcher struct {

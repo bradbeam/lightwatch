@@ -2,6 +2,7 @@ apiVersion: lightwatch.vigilant.dev/v1alpha1
 kind: EnvWatcher
 metadata:
   name: envwatcher-sample
+  namespace: lightstream-system
 spec:
-  # Add fields here
-  foo: bar
+  url: https://gist.githubusercontent.com/bradbeam/70ff63a83333cfa99b40071b762eda77/raw/418ce832e2e526d993307f14119e2a6a43ead1d6/samplefile.txt
+  frequency: 10s
