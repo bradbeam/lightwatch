@@ -114,31 +114,7 @@ func (suite *ControllerSuite) TestCreateResource() {
 }
 
 func (suite *ControllerSuite) TestController() {
-
-	/*
-		scheme := runtime.NewScheme()
-		mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{Scheme: scheme})
-		suite.Assert().NoError(err)
-
-		// This is an ugly way to initialize things.
-		err = (&EnvWatcherReconciler{
-			Client: mgr.GetClient(),
-			Log:    ctrl.Log.WithName("controllers").WithName("EnvWatcher"),
-			Scheme: mgr.GetScheme(),
-		}).SetupWithManager(mgr)
-		suite.Assert().NoError(err)
-
-		stopCh := make(chan struct{})
-		defer close(stopCh)
-
-		go func() {
-			err = mgr.Start(stopCh)
-			suite.Assert().NoError(err)
-		}()
-	*/
-
 	suite.createCRD()
-	defer suite.deleteCRD()
 
 	testReq := ctrl.Request{NamespacedName: types.NamespacedName{Name: suite.watchName, Namespace: suite.watchNS}}
 	ewReconciler := &EnvWatcherReconciler{
@@ -176,10 +152,41 @@ func (suite *ControllerSuite) TestController() {
 	suite.Assert().LessOrEqual(time.Now().Sub(time.Unix(eWatcher.Status.LastCheck, 0)).Seconds(), float64(5))
 
 	// Deletion
-	/*
-		err = suite.k8sClient.Delete(context.Background(), cfgMap)
-		suite.Assert().NoError(err)
-	*/
+	// test deletion of configmap; this should get recreated during the next run
+	err = suite.k8sClient.Delete(context.Background(), cfgMap)
+	suite.Assert().NoError(err)
+
+	// wait frequency
+	time.Sleep(time.Second)
+
+	// Wait for configmap to be created
+	for i := 0; i < 10; i++ {
+		if err = suite.k8sClient.Get(context.Background(), client.ObjectKey{Namespace: suite.watchNS, Name: suite.watchName}, cfgMap); err == nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	suite.Assert().NoError(err)
+	// Verify configmap name matches
+	suite.Assert().Equal(suite.watchName, cfgMap.ObjectMeta.Name)
+	// Verify we have expected configmap.data length
+	suite.Assert().Len(cfgMap.Data, suite.configLines)
+
+	// delete crd, this should remove crd and configmap
+	// delete crd
+	err = suite.k8sClient.Delete(context.Background(), eWatcher)
+	suite.Assert().NoError(err)
+
+	// Send event for CRD; this should trigger the downstream cleanup
+	_, err = ewReconciler.Reconcile(testReq)
+	suite.Assert().NoError(err)
+
+	time.Sleep(time.Second)
+
+	// check for deleted cfgmap
+	cfgMap = &corev1.ConfigMap{}
+	err = suite.k8sClient.Get(context.Background(), client.ObjectKey{Namespace: suite.watchNS, Name: suite.watchName}, cfgMap)
+	suite.Assert().Error(err)
 }
 
 func (suite *ControllerSuite) TestDownloadFile() {

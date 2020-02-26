@@ -75,14 +75,11 @@ func (r *EnvWatcherReconciler) Reconcile(req ctrl.Request) (res ctrl.Result, err
 
 	// Identify the resource
 	if err = r.Get(ctx, req.NamespacedName, eWatch); err != nil {
+		defer cancel()
 		// If we cant find the resource, then assume it's been deleted
 		if errors.IsNotFound(err) {
-			// These seem unnecessary because we call cancel in cleanup,
-			// but compiler yells at us otherwise
-			cancel()
 			return res, r.cleanupWatcher(ctx, req.NamespacedName)
 		}
-		cancel()
 		return res, err
 	}
 
@@ -91,7 +88,7 @@ func (r *EnvWatcherReconciler) Reconcile(req ctrl.Request) (res ctrl.Result, err
 	// resource is no longer found, but this way we can try to do the right thing first and rely on
 	// the above as a catchall.
 	if !eWatch.ObjectMeta.DeletionTimestamp.IsZero() {
-		cancel()
+		defer cancel()
 		return res, r.cleanupWatcher(ctx, req.NamespacedName)
 	}
 
@@ -126,7 +123,7 @@ func (r *EnvWatcherReconciler) cleanupWatcher(ctx context.Context, namespacedNam
 	}
 	r.Unlock()
 
-	var cfgMap *corev1.ConfigMap
+	cfgMap := &corev1.ConfigMap{}
 	if err = r.Get(ctx, namespacedName, cfgMap); err != nil {
 		if errors.IsNotFound(err) {
 			return nil
@@ -190,6 +187,7 @@ func (r *EnvWatcherReconciler) doStuff(ctx context.Context, eWatch *lightwatchv1
 	eWatch.Status.LastCheck = time.Now().Unix()
 
 	// discover configmap
+	var needToRecreateCfgMap bool
 	cfgMap := &corev1.ConfigMap{}
 	if err = r.Get(ctx, namespacedName, cfgMap); err != nil {
 		if errors.IsNotFound(err) {
@@ -206,15 +204,21 @@ func (r *EnvWatcherReconciler) doStuff(ctx context.Context, eWatch *lightwatchv1
 				r.Log.Error(err, "failed to create configmap", "configmap", namespacedName)
 				return
 			}
+			needToRecreateCfgMap = true
 		} else {
 			r.Log.Error(err, "failed to find configmap", "configmap", namespacedName)
 			return
 		}
+	} else {
 	}
 
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
 		fields := strings.Split(scanner.Text(), "=")
+		if len(fields) != 2 {
+			r.Log.Info(fmt.Sprintf("ignoring invalid line for %v: %s", namespacedName, scanner.Text()))
+			continue
+		}
 		cfgMap.Data[fields[0]] = fields[1]
 	}
 	if err := scanner.Err(); err != nil {
@@ -222,7 +226,7 @@ func (r *EnvWatcherReconciler) doStuff(ctx context.Context, eWatch *lightwatchv1
 		return
 	}
 
-	if eWatch.Status.Checksum != remoteChecksum {
+	if (eWatch.Status.Checksum != remoteChecksum) || needToRecreateCfgMap {
 		eWatch.Status.Checksum = remoteChecksum
 		if err = r.Update(ctx, cfgMap); err != nil {
 			r.Log.Error(err, "failed to update configmap")
