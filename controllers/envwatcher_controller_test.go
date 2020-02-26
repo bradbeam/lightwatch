@@ -46,10 +46,11 @@ type ControllerSuite struct {
 	cfg       *rest.Config
 	ts        *httptest.Server
 
-	checksum    string
-	watchName   string
-	watchNS     string
-	configLines int
+	checksum         string
+	watchName        string
+	watchNS          string
+	defaultFrequency string
+	configLines      int
 }
 
 func TestControllerSuite(t *testing.T) {
@@ -57,15 +58,17 @@ func TestControllerSuite(t *testing.T) {
 }
 
 func (suite *ControllerSuite) SetupTest() {
-	suite.testEnv = &envtest.Environment{
-		CRDDirectoryPaths: []string{filepath.Join("..", "config", "crd", "bases")},
-	}
-
 	var (
 		cfg       *rest.Config
 		err       error
 		k8sClient client.Client
 	)
+
+	suite.defaultFrequency = "1s"
+
+	suite.testEnv = &envtest.Environment{
+		CRDDirectoryPaths: []string{filepath.Join("..", "config", "crd", "bases")},
+	}
 
 	cfg, err = suite.testEnv.Start()
 	suite.Require().NoError(err)
@@ -109,12 +112,12 @@ func (suite *ControllerSuite) TearDownTest() {
 }
 
 func (suite *ControllerSuite) TestCreateResource() {
-	suite.createCRD()
+	suite.createCRD(suite.defaultFrequency)
 	suite.deleteCRD()
 }
 
 func (suite *ControllerSuite) TestControllerNewResource() {
-	suite.createCRD()
+	suite.createCRD(suite.defaultFrequency)
 	defer suite.deleteCRD()
 
 	ewReconciler := &EnvWatcherReconciler{
@@ -127,7 +130,7 @@ func (suite *ControllerSuite) TestControllerNewResource() {
 }
 
 func (suite *ControllerSuite) TestControllerDeleteResource() {
-	suite.createCRD()
+	suite.createCRD(suite.defaultFrequency)
 	defer suite.deleteCRD()
 
 	ewReconciler := &EnvWatcherReconciler{
@@ -141,7 +144,7 @@ func (suite *ControllerSuite) TestControllerDeleteResource() {
 }
 
 func (suite *ControllerSuite) TestControllerRecreateConfigmap() {
-	suite.createCRD()
+	suite.createCRD(suite.defaultFrequency)
 	defer suite.deleteCRD()
 
 	ewReconciler := &EnvWatcherReconciler{
@@ -176,6 +179,76 @@ func (suite *ControllerSuite) TestControllerRecreateConfigmap() {
 	suite.Assert().Len(cfgMap.Data, suite.configLines)
 }
 
+func (suite *ControllerSuite) TestControllerRunner() {
+	suite.createCRD(suite.defaultFrequency)
+	defer suite.deleteCRD()
+
+	ewReconciler := &EnvWatcherReconciler{
+		Client: suite.k8sClient,
+		Scheme: runtime.NewScheme(),
+		Log:    ctrl.Log,
+	}
+
+	suite.createAndReconcile(ewReconciler)
+
+	// Verify EnvWatcher status was updated correctly
+	eWatcher := &lightwatchv1alpha1.EnvWatcher{}
+	err := suite.k8sClient.Get(context.Background(), client.ObjectKey{Namespace: suite.watchNS, Name: suite.watchName}, eWatcher)
+	suite.Assert().NoError(err)
+
+	prevLastCheck := eWatcher.Status.LastCheck
+
+	// Wait for an update
+	time.Sleep(2 * time.Second)
+
+	err = suite.k8sClient.Get(context.Background(), client.ObjectKey{Namespace: suite.watchNS, Name: suite.watchName}, eWatcher)
+	suite.Assert().NoError(err)
+	suite.Assert().GreaterOrEqual(eWatcher.Status.LastCheck, prevLastCheck)
+
+	suite.verifyConfigmap()
+}
+
+func (suite *ControllerSuite) TestControllerUpdateResource() {
+	suite.createCRD(suite.defaultFrequency)
+	defer suite.deleteCRD()
+
+	ewReconciler := &EnvWatcherReconciler{
+		Client: suite.k8sClient,
+		Scheme: runtime.NewScheme(),
+		Log:    ctrl.Log,
+	}
+
+	suite.createAndReconcile(ewReconciler)
+
+	// Get previous last check
+	eWatcher := &lightwatchv1alpha1.EnvWatcher{}
+	err := suite.k8sClient.Get(context.Background(), client.ObjectKey{Namespace: suite.watchNS, Name: suite.watchName}, eWatcher)
+	suite.Assert().NoError(err)
+
+	prevWatcher := *eWatcher
+
+	// Update CRD to change frequency from 1s to 5s
+	suite.createCRD("5s")
+
+	// Verify CRD was updated
+	err = suite.k8sClient.Get(context.Background(), client.ObjectKey{Namespace: suite.watchNS, Name: suite.watchName}, eWatcher)
+	suite.Assert().NoError(err)
+	suite.Assert().Equal("5s", eWatcher.Spec.Frequency)
+	suite.verifyConfigmap()
+
+	// Wait for an update ( new interval + some cushion )
+	time.Sleep(7 * time.Second)
+
+	// Compare old watcher to new watcher
+	err = suite.k8sClient.Get(context.Background(), client.ObjectKey{Namespace: suite.watchNS, Name: suite.watchName}, eWatcher)
+	suite.Assert().NoError(err)
+	suite.Assert().GreaterOrEqual(eWatcher.Status.LastCheck, prevWatcher.Status.LastCheck)
+	// Generation should have only incremented by one ( we changed the value )
+	suite.Assert().Equal(eWatcher.ObjectMeta.Generation, prevWatcher.ObjectMeta.Generation+1)
+
+	suite.verifyConfigmap()
+}
+
 func (suite *ControllerSuite) TestDownloadFile() {
 	data, err := downloadFile(suite.ts.URL)
 	suite.Assert().NoError(err)
@@ -185,19 +258,26 @@ func (suite *ControllerSuite) TestDownloadFile() {
 }
 
 // Helper funcs
-func (suite *ControllerSuite) createCRD() {
+func (suite *ControllerSuite) createCRD(frequency string) {
 	var err error
-	eWatch := &lightwatchv1alpha1.EnvWatcher{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: suite.watchNS,
-			Name:      suite.watchName,
-		},
-		Spec: lightwatchv1alpha1.EnvWatcherSpec{
-			URL:       suite.ts.URL,
-			Frequency: "1s",
-		},
+	eWatch := &lightwatchv1alpha1.EnvWatcher{}
+
+	if err = suite.k8sClient.Get(context.Background(), client.ObjectKey{Namespace: suite.watchNS, Name: suite.watchName}, eWatch); err != nil {
+		eWatch = &lightwatchv1alpha1.EnvWatcher{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: suite.watchNS,
+				Name:      suite.watchName,
+			},
+			Spec: lightwatchv1alpha1.EnvWatcherSpec{
+				URL:       suite.ts.URL,
+				Frequency: frequency,
+			},
+		}
+		err = suite.k8sClient.Create(context.Background(), eWatch)
+	} else {
+		eWatch.Spec.Frequency = frequency
+		err = suite.k8sClient.Update(context.Background(), eWatch)
 	}
-	err = suite.k8sClient.Create(context.Background(), eWatch)
 	suite.Assert().NoError(err)
 
 	eWatch = &lightwatchv1alpha1.EnvWatcher{}
@@ -258,13 +338,8 @@ func (suite *ControllerSuite) deleteCM() {
 	suite.Assert().NoError(err)
 }
 
-func (suite *ControllerSuite) createAndReconcile(ewReconciler *EnvWatcherReconciler) {
-	testReq := ctrl.Request{NamespacedName: types.NamespacedName{Name: suite.watchName, Namespace: suite.watchNS}}
-
-	// Creation
-	_, err := ewReconciler.Reconcile(testReq)
-	suite.Assert().NoError(err)
-
+func (suite *ControllerSuite) verifyConfigmap() {
+	var err error
 	cfgMap := &corev1.ConfigMap{}
 
 	// Wait for configmap to be created
@@ -279,6 +354,16 @@ func (suite *ControllerSuite) createAndReconcile(ewReconciler *EnvWatcherReconci
 	suite.Assert().Equal(suite.watchName, cfgMap.ObjectMeta.Name)
 	// Verify we have expected configmap.data length
 	suite.Assert().Len(cfgMap.Data, suite.configLines)
+
+}
+func (suite *ControllerSuite) createAndReconcile(ewReconciler *EnvWatcherReconciler) {
+	testReq := ctrl.Request{NamespacedName: types.NamespacedName{Name: suite.watchName, Namespace: suite.watchNS}}
+
+	// Creation
+	_, err := ewReconciler.Reconcile(testReq)
+	suite.Assert().NoError(err)
+
+	suite.verifyConfigmap()
 
 	// Verify EnvWatcher status was updated correctly
 	eWatcher := &lightwatchv1alpha1.EnvWatcher{}
