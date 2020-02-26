@@ -47,8 +47,8 @@ type EnvWatcherReconciler struct {
 	Log    logr.Logger
 	Scheme *runtime.Scheme
 
-	// We'll use this map to keep track of goroutines to contexts
-	// so we can cancel/stop them upon deletion
+	// cache tracks the resource's goroutine with a context's cancelFunc
+	// so we can cancel/stop them upon update/deletion
 	sync.Mutex
 	cache map[types.NamespacedName]context.CancelFunc
 }
@@ -58,24 +58,24 @@ type EnvWatcherReconciler struct {
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps/status,verbs=get;update;patch
 
+// Reconcile is the main control loop. A request specifying the watched resource name and namespace
+// triggers the decision process.
 func (r *EnvWatcherReconciler) Reconcile(req ctrl.Request) (res ctrl.Result, err error) {
-	ctx, cancel := context.WithCancel(context.Background())
+	r.Log.Info(fmt.Sprintf("reconcile loop starting for %v", req.NamespacedName))
+	defer r.Log.Info(fmt.Sprintf("reconcile loop finished for %v", req.NamespacedName))
+
+	ctx := context.Background()
+
 	_ = r.Log.WithValues("envwatcher", req.NamespacedName)
 
 	if r.cache == nil {
-		r.Lock()
 		r.cache = make(map[types.NamespacedName]context.CancelFunc)
-		r.Unlock()
 	}
 
 	eWatch := &lightwatchv1alpha1.EnvWatcher{}
 
-	r.Log.Info(fmt.Sprintf("Starting reconcile loop for %v", req.NamespacedName))
-	defer r.Log.Info(fmt.Sprintf("Finish reconcile loop for %v", req.NamespacedName))
-
 	// Identify the resource
 	if err = r.Get(ctx, req.NamespacedName, eWatch); err != nil {
-		defer cancel()
 		// If we cant find the resource, then assume it's been deleted
 		if errors.IsNotFound(err) {
 			return res, r.cleanupWatcher(ctx, req.NamespacedName)
@@ -83,45 +83,49 @@ func (r *EnvWatcherReconciler) Reconcile(req ctrl.Request) (res ctrl.Result, err
 		return res, err
 	}
 
-	// CRD being deleted.
+	// Handle case where CRD being deleted.
 	// This is probably overkill with the logic above to handle cleanup if the
-	// resource is no longer found, but this way we can try to do the right thing first and rely on
-	// the above as a catchall.
+	// resource is no longer found, but this way we can try to do the right thing
+	// first and rely on the above as a catchall.
 	if !eWatch.ObjectMeta.DeletionTimestamp.IsZero() {
-		defer cancel()
 		return res, r.cleanupWatcher(ctx, req.NamespacedName)
+	}
+
+	// Compare the last generation (version)  of the resource we've handled to the current
+	// resource version. Allow us to skip noop situations
+	if eWatch.ObjectMeta.Generation == eWatch.Status.ObservedGeneration {
+		return res, err
 	}
 
 	// If we get an update, interrupt running goroutine
 	if _, ok := r.cache[req.NamespacedName]; ok {
+		r.Log.Info(fmt.Sprintf("received an update for %v, canceling currently running watcher", req.NamespacedName))
 		r.Lock()
 		r.cache[req.NamespacedName]()
 		r.Unlock()
 	}
 
-	// Ensure we keep track of the goroutine contexts associated with each env watcher
-	r.Lock()
-	r.cache[req.NamespacedName] = cancel
-	r.Unlock()
-
 	// Kick off goroutine for each env watch CRD
 	go func() {
+		r.Log.Info(fmt.Sprintf("scheduling new watcher for %v", req.NamespacedName))
 		// Not sure if we want to try to handle requeueing logic here since we return
 		// below
-		r.watcher(ctx, eWatch)
+		r.watcher(ctx, req.NamespacedName, eWatch)
 	}()
 
 	return res, nil
 }
 
-// cleanupWatcher handles terminating any currently running goroutine associated with the env watcher resource
-// as well as deleting the configmap associated with the env watcher.
+// cleanupWatcher handles terminating any currently running goroutine associated
+// with the env watcher resource as well as deleting the configmap associated
+// with the env watcher.
 func (r *EnvWatcherReconciler) cleanupWatcher(ctx context.Context, namespacedName types.NamespacedName) (err error) {
 	r.Lock()
+	defer r.Unlock()
+
 	if cancelfn, ok := r.cache[namespacedName]; ok {
 		cancelfn()
 	}
-	r.Unlock()
 
 	cfgMap := &corev1.ConfigMap{}
 	if err = r.Get(ctx, namespacedName, cfgMap); err != nil {
@@ -134,20 +138,31 @@ func (r *EnvWatcherReconciler) cleanupWatcher(ctx context.Context, namespacedNam
 	return r.Delete(ctx, cfgMap)
 }
 
+// SetupWithManager starts the main control loop for the controller.
 func (r *EnvWatcherReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&lightwatchv1alpha1.EnvWatcher{}).
 		Complete(r)
 }
 
-func (r *EnvWatcherReconciler) watcher(ctx context.Context, eWatch *lightwatchv1alpha1.EnvWatcher) {
+// watcher handles the recurring task of fetching a remote resource.
+func (r *EnvWatcherReconciler) watcher(pctx context.Context, namespacedName types.NamespacedName, eWatch *lightwatchv1alpha1.EnvWatcher) {
+	ctx, cancel := context.WithCancel(pctx)
+
+	// Ensure we keep track of the goroutine contexts associated with each env watcher
+	r.Lock()
+	// Explicitly call the cancelFunc again so we dont risk any runaway goroutines.
+	r.cache[namespacedName]()
+	r.cache[namespacedName] = cancel
+	r.Unlock()
+
 	period, err := time.ParseDuration(eWatch.Spec.Frequency)
 	if err != nil {
 		r.Log.Error(err, "failed to parse frequency", "frequency", eWatch.Spec.Frequency)
 		return
 	}
 
-	// This means now() is after last check + 1h
+	// This means now() is after last check + period
 	if time.Now().After(time.Unix(eWatch.Status.LastCheck, 0).Add(period)) {
 		r.doStuff(ctx, eWatch)
 	} else {
@@ -170,6 +185,13 @@ func (r *EnvWatcherReconciler) watcher(ctx context.Context, eWatch *lightwatchv1
 	}
 }
 
+// doStuff handles the fetching of a remote resource and deciding what to do.
+// First, the remote file is fetched and checksum calculated. If the checksum
+// matches the existing file, the EnvWatcher resource's lastCheck will be updated
+// and no other action is performed.
+// If the destination configmap does not exist, it will be (re-)created.
+// Any line in the remote file that does not have exactly 2 fields separated by
+// an '=' will be discarded.
 func (r *EnvWatcherReconciler) doStuff(ctx context.Context, eWatch *lightwatchv1alpha1.EnvWatcher) {
 	var (
 		data           []byte
@@ -228,16 +250,21 @@ func (r *EnvWatcherReconciler) doStuff(ctx context.Context, eWatch *lightwatchv1
 
 	if (eWatch.Status.Checksum != remoteChecksum) || needToRecreateCfgMap {
 		eWatch.Status.Checksum = remoteChecksum
+
 		if err = r.Update(ctx, cfgMap); err != nil {
 			r.Log.Error(err, "failed to update configmap")
 		}
 	}
+
+	// So we can keep track of the last version we saw
+	eWatch.Status.ObservedGeneration = eWatch.ObjectMeta.Generation
 
 	if err = r.Status().Update(ctx, eWatch); err != nil {
 		r.Log.Error(err, "failed to update env watcher status")
 	}
 }
 
+// downloadFile downloads a remote file and returns the contents of the file.
 func downloadFile(downloadFile string) (data []byte, err error) {
 	if _, err = url.Parse(downloadFile); err != nil {
 		return data, err
@@ -258,6 +285,7 @@ func downloadFile(downloadFile string) (data []byte, err error) {
 	return ioutil.ReadAll(resp.Body)
 }
 
+// checksumData calculates the sha256 hash of a given []byte.
 func checksumData(data []byte) string {
 	return fmt.Sprintf("%x", sha256.Sum256(data))
 }

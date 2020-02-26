@@ -39,8 +39,9 @@ type EnvWatcherStatus struct {
 
 	// LastCheck is a timestamp representing the last time this resource
 	// was fetched/checked.
-	LastCheck int64  `json:"lastcheck,omitempty"`
-	Checksum  string `json:"checksum,omitempty"`
+	LastCheck          int64  `json:"lastcheck,omitempty"`
+	Checksum           string `json:"checksum,omitempty"`
+	ObservedGeneration int64  `json:"observedGeneration"`
 }
 
 // +kubebuilder:object:root=true
