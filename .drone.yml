@@ -16,3 +16,22 @@ steps:
     - GOFLAGS="" make controller-gen
     - make test
 
+- name: build-container
+  image: plugins/docker
+  settings:
+    repo: bradbeam/lightstream
+    auto_tag: true
+    dry_run: true
+
+- name: push-container
+  image: plugins/docker
+  settings:
+    username: bradbeam
+    password:
+      from_secret: docker_password
+    repo: bradbeam/lightstream
+    auto_tag: true
+  when:
+    event:
+      exclude:
+      - pull_request
