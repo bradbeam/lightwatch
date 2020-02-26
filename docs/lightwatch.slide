@@ -1,0 +1,118 @@
+LightWatch
+Feb 2020
+
+Brad Beam
+brad.beam@b-rad.info
+https://github.com/bradbeam/lightwatch
+
+* Problem
+
+  Write a Kubernetes job that executes once an hour and fetches
+  a list of environment variables from an S3 file, then updates a ConfigMap only
+  if one of the values changed.
+
+* Solution
+
+.link https://github.com/kubernetes-sigs/kubebuilder Kubebuilder
+
+Kubebuilder is a SDK for building Kubernetes APIs using CRDs.
+- handles boilerplate of getting a controller written
+- pulls in community best practices
+
+* The CRD
+
+The CRD is the end user facing resource.
+
+*EnvWatcher* sounds like a cool name.
+
+* EnvWatcher CRD (spec)
+
+Given the probelm statement, the important variable is the target URL.
+
+.code -numbers ../api/v1alpha1/envwatcher_types.go /type EnvWatcherSpec struct/,/}/
+
+Frequency was added in for some extra flair ( and to make testing mo betta ).
+
+* EnvWatcher CRD (status)
+
+Kubernetes provides a status subresource. This allows us to use the `Status` struct to hold state without triggering an update to the actual resource (CRD).
+
+.code -numbers ../api/v1alpha1/envwatcher_types.go /type EnvWatcherStatus struct/,/}/
+
+This allows us to track some useful tidbits.
+
+: Note on Observed Generation:
+: *ObservedGeneration* feels kind of hacky, but allows us to more explicitly handle updates.
+: .link https://github.com/kubernetes-sigs/kubebuilder/issues/618#issuecomment-499913947 ref
+
+* Controller
+
+The controller is responsible for doing the work.
+
+* Controller (Reconcile)
+
+The Reconcile function receives all events for the EnvWatcher resource. The included event/request contains the resource name and namespace.
+
+.code -numbers ../controllers/envwatcher_controller.go /Reconcile\(req/
+
+Workflow Overview:
+
+- First, we try to lookup the object. If we find it, great. If not, then we trigger a cleanup step.
+- Second, we check to see if the resource is deleting. If so, we trigger a cleanup step.
+- Third, we check if the resource has actually changed. If not, then we return early.
+- Lastly, we launch a goroutine to watch our target URL.
+
+
+* Controller (Reconcile Workflow)
+
+.code -numbers ../controllers/envwatcher_controller.go /Get\(ctx, req.NamespacedName, eWatch\)/,/^\t}/
+.code -numbers ../controllers/envwatcher_controller.go /IsZero/,/}/
+.code -numbers ../controllers/envwatcher_controller.go /Generation == /,/}/
+.code -numbers ../controllers/envwatcher_controller.go /go func/,/}/
+
+: Code heavy slide, but these are the important conditions:
+
+* Controller (watcher)
+
+The watcher handles the scheduling of the check against the remote target.
+
+.code -numbers ../controllers/envwatcher_controller.go /period, err/
+.code -numbers ../controllers/envwatcher_controller.go /watcherTicker/,/Stop/
+.code -numbers ../controllers/envwatcher_controller.go /for {/,/^\t}/
+
+* Controller (doStuff)
+
+This is responsible for fetching the remote file and handling any necessary updates to the configmap.
+
+doStuff Overview:
+
+- Download file and calculate sha256 hash
+- Compare downloaded hash against previously saved hash
+- Generate / update configmap if hash doesnt match
+- Update CRD statuses
+
+* Controller (doStuff Workflow)
+
+.code -numbers ../controllers/envwatcher_controller.go /downloadFile/,/checksumData/
+.code -numbers ../controllers/envwatcher_controller.go /Checksum != /,/^\t}//
+
+* Controller (doStuff Workflow)
+
+.code -numbers ../controllers/envwatcher_controller.go /scanner/,/^\t}/
+.code -numbers ../controllers/envwatcher_controller.go /Generation = eWatch/,/^\t}/
+
+* Enhancements
+
+- Expose additional prometheus metrics
+- Additional debug logging
+- Include remote checksum as part of CRD to validate file contents
+- Set deadline/timeout for file download
+- Use hashicorp go-getter to support additional protocols (https://github.com/hashicorp/go-getter)
+
+* Considerations
+
+There are a couple ways to have implemented this - scratch, operator-sdk, kubebuilder. I've used operator-sdk in the past ( v0.0.5 ) and enough had changed where it was a relatively even field, so I decided to give kubebuilder a shot. There's some different patterns of thought, but it's fairly straightforward.
+
+A CronJob resource may have also been a fit for this, but would have had some additional challenges. It would have required a secondary program/application and logging/metrics aggregation would be a bit awkward.
+
+A `FROM scratch` container could have been used instead of distroless, but would have required pulling in CA certs.
