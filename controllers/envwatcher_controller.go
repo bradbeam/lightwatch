@@ -151,8 +151,12 @@ func (r *EnvWatcherReconciler) watcher(pctx context.Context, namespacedName type
 
 	// Ensure we keep track of the goroutine contexts associated with each env watcher
 	r.Lock()
+
 	// Explicitly call the cancelFunc again so we dont risk any runaway goroutines.
-	r.cache[namespacedName]()
+	if _, ok := r.cache[namespacedName]; ok {
+		r.cache[namespacedName]()
+	}
+
 	r.cache[namespacedName] = cancel
 	r.Unlock()
 
