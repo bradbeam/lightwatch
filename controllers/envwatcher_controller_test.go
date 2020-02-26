@@ -28,6 +28,7 @@ import (
 	lightwatchv1alpha1 "github.com/bradbeam/lightstream/api/v1alpha1"
 	"github.com/stretchr/testify/suite"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -86,14 +87,13 @@ func (suite *ControllerSuite) SetupTest() {
 	suite.Require().NotNil(eWatch)
 
 	// Start up http server to serve assets
+	suite.configLines = 10
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		suite.configLines = 10
 		for i := 0; i < suite.configLines; i++ {
 			fmt.Fprintf(w, "key%d=value%d\n", i, i)
 		}
-	},
-	),
-	)
+	}))
+
 	suite.ts = ts
 	// Cheesed checksum ( sha256(output from above) )
 	suite.checksum = "8f182d8440c7367aab0833cba67d7716d779e74a121f6c3540a57a8c7df1f3d3"
@@ -113,46 +113,49 @@ func (suite *ControllerSuite) TestCreateResource() {
 	suite.deleteCRD()
 }
 
-func (suite *ControllerSuite) TestController() {
+func (suite *ControllerSuite) TestControllerNewResource() {
 	suite.createCRD()
+	defer suite.deleteCRD()
 
-	testReq := ctrl.Request{NamespacedName: types.NamespacedName{Name: suite.watchName, Namespace: suite.watchNS}}
 	ewReconciler := &EnvWatcherReconciler{
 		Client: suite.k8sClient,
 		Scheme: runtime.NewScheme(),
 		Log:    ctrl.Log,
 	}
 
-	// Creation
-	_, err := ewReconciler.Reconcile(testReq)
-	suite.Assert().NoError(err)
+	suite.createAndReconcile(ewReconciler)
+}
 
-	cfgMap := &corev1.ConfigMap{}
+func (suite *ControllerSuite) TestControllerDeleteResource() {
+	suite.createCRD()
+	defer suite.deleteCRD()
 
-	// Wait for configmap to be created
-	for i := 0; i < 10; i++ {
-		if err = suite.k8sClient.Get(context.Background(), client.ObjectKey{Namespace: suite.watchNS, Name: suite.watchName}, cfgMap); err == nil {
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
+	ewReconciler := &EnvWatcherReconciler{
+		Client: suite.k8sClient,
+		Scheme: runtime.NewScheme(),
+		Log:    ctrl.Log,
 	}
-	suite.Assert().NoError(err)
-	// Verify configmap name matches
-	suite.Assert().Equal(suite.watchName, cfgMap.ObjectMeta.Name)
-	// Verify we have expected configmap.data length
-	suite.Assert().Len(cfgMap.Data, suite.configLines)
 
-	// Verify EnvWatcher status was updated correctly
-	eWatcher := &lightwatchv1alpha1.EnvWatcher{}
-	err = suite.k8sClient.Get(context.Background(), client.ObjectKey{Namespace: suite.watchNS, Name: suite.watchName}, eWatcher)
-	suite.Assert().NoError(err)
-	// Verify checksums match
-	suite.Assert().Equal(suite.checksum, eWatcher.Status.Checksum)
-	// Verify the last check timestamp was recent ( within last 5 seconds )
-	suite.Assert().LessOrEqual(time.Now().Sub(time.Unix(eWatcher.Status.LastCheck, 0)).Seconds(), float64(5))
+	suite.createAndReconcile(ewReconciler)
+	suite.deleteAndReconcile(ewReconciler)
+}
 
-	// Deletion
+func (suite *ControllerSuite) TestControllerRecreateConfigmap() {
+	suite.createCRD()
+	defer suite.deleteCRD()
+
+	ewReconciler := &EnvWatcherReconciler{
+		Client: suite.k8sClient,
+		Scheme: runtime.NewScheme(),
+		Log:    ctrl.Log,
+	}
+
+	suite.createAndReconcile(ewReconciler)
+
 	// test deletion of configmap; this should get recreated during the next run
+	cfgMap := &corev1.ConfigMap{}
+	err := suite.k8sClient.Get(context.Background(), client.ObjectKey{Namespace: suite.watchNS, Name: suite.watchName}, cfgMap)
+	suite.Assert().NoError(err)
 	err = suite.k8sClient.Delete(context.Background(), cfgMap)
 	suite.Assert().NoError(err)
 
@@ -171,22 +174,6 @@ func (suite *ControllerSuite) TestController() {
 	suite.Assert().Equal(suite.watchName, cfgMap.ObjectMeta.Name)
 	// Verify we have expected configmap.data length
 	suite.Assert().Len(cfgMap.Data, suite.configLines)
-
-	// delete crd, this should remove crd and configmap
-	// delete crd
-	err = suite.k8sClient.Delete(context.Background(), eWatcher)
-	suite.Assert().NoError(err)
-
-	// Send event for CRD; this should trigger the downstream cleanup
-	_, err = ewReconciler.Reconcile(testReq)
-	suite.Assert().NoError(err)
-
-	time.Sleep(time.Second)
-
-	// check for deleted cfgmap
-	cfgMap = &corev1.ConfigMap{}
-	err = suite.k8sClient.Get(context.Background(), client.ObjectKey{Namespace: suite.watchNS, Name: suite.watchName}, cfgMap)
-	suite.Assert().Error(err)
 }
 
 func (suite *ControllerSuite) TestDownloadFile() {
@@ -197,6 +184,7 @@ func (suite *ControllerSuite) TestDownloadFile() {
 	suite.Assert().Equal(suite.checksum, checksum)
 }
 
+// Helper funcs
 func (suite *ControllerSuite) createCRD() {
 	var err error
 	eWatch := &lightwatchv1alpha1.EnvWatcher{
@@ -228,8 +216,14 @@ func (suite *ControllerSuite) deleteCRD() {
 			Name:      suite.watchName,
 		},
 	}
+
 	err = suite.k8sClient.Delete(context.Background(), eWatch)
-	suite.Assert().NoError(err)
+	switch {
+	case errors.IsNotFound(err):
+	// Ignore if resource doesnt exist
+	default:
+		suite.Assert().NoError(err)
+	}
 }
 
 func (suite *ControllerSuite) createCM() {
@@ -262,4 +256,59 @@ func (suite *ControllerSuite) deleteCM() {
 	}
 	err = suite.k8sClient.Delete(context.Background(), eWatch)
 	suite.Assert().NoError(err)
+}
+
+func (suite *ControllerSuite) createAndReconcile(ewReconciler *EnvWatcherReconciler) {
+	testReq := ctrl.Request{NamespacedName: types.NamespacedName{Name: suite.watchName, Namespace: suite.watchNS}}
+
+	// Creation
+	_, err := ewReconciler.Reconcile(testReq)
+	suite.Assert().NoError(err)
+
+	cfgMap := &corev1.ConfigMap{}
+
+	// Wait for configmap to be created
+	for i := 0; i < 10; i++ {
+		if err = suite.k8sClient.Get(context.Background(), client.ObjectKey{Namespace: suite.watchNS, Name: suite.watchName}, cfgMap); err == nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	suite.Assert().NoError(err)
+	// Verify configmap name matches
+	suite.Assert().Equal(suite.watchName, cfgMap.ObjectMeta.Name)
+	// Verify we have expected configmap.data length
+	suite.Assert().Len(cfgMap.Data, suite.configLines)
+
+	// Verify EnvWatcher status was updated correctly
+	eWatcher := &lightwatchv1alpha1.EnvWatcher{}
+	err = suite.k8sClient.Get(context.Background(), client.ObjectKey{Namespace: suite.watchNS, Name: suite.watchName}, eWatcher)
+	suite.Assert().NoError(err)
+	// Verify checksums match
+	suite.Assert().Equal(suite.checksum, eWatcher.Status.Checksum)
+	// Verify the last check timestamp was recent ( within last 5 seconds )
+	suite.Assert().LessOrEqual(time.Now().Sub(time.Unix(eWatcher.Status.LastCheck, 0)).Seconds(), float64(5))
+}
+
+func (suite *ControllerSuite) deleteAndReconcile(ewReconciler *EnvWatcherReconciler) {
+	testReq := ctrl.Request{NamespacedName: types.NamespacedName{Name: suite.watchName, Namespace: suite.watchNS}}
+
+	// delete crd, this should remove crd and configmap
+	// delete crd
+	eWatcher := &lightwatchv1alpha1.EnvWatcher{}
+	err := suite.k8sClient.Get(context.Background(), client.ObjectKey{Namespace: suite.watchNS, Name: suite.watchName}, eWatcher)
+	suite.Assert().NoError(err)
+	err = suite.k8sClient.Delete(context.Background(), eWatcher)
+	suite.Assert().NoError(err)
+
+	// Send event for CRD; this should trigger the downstream cleanup
+	_, err = ewReconciler.Reconcile(testReq)
+	suite.Assert().NoError(err)
+
+	time.Sleep(time.Second)
+
+	// check for deleted cfgmap
+	cfgMap := &corev1.ConfigMap{}
+	err = suite.k8sClient.Get(context.Background(), client.ObjectKey{Namespace: suite.watchNS, Name: suite.watchName}, cfgMap)
+	suite.Assert().Error(err)
 }
