@@ -250,7 +250,7 @@ func (suite *ControllerSuite) TestControllerUpdateResource() {
 }
 
 func (suite *ControllerSuite) TestDownloadFile() {
-	data, err := downloadFile(suite.ts.URL)
+	data, err := downloadFile(suite.ts.URL, fmt.Sprintf("%s.%s", suite.watchNS, suite.watchName))
 	suite.Assert().NoError(err)
 
 	checksum := checksumData(data)

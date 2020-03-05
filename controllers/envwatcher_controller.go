@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -135,6 +136,7 @@ func (r *EnvWatcherReconciler) cleanupWatcher(ctx context.Context, namespacedNam
 		return err
 	}
 
+	resourceCount.Dec()
 	return r.Delete(ctx, cfgMap)
 }
 
@@ -159,6 +161,8 @@ func (r *EnvWatcherReconciler) watcher(pctx context.Context, namespacedName type
 
 	r.cache[namespacedName] = cancel
 	r.Unlock()
+
+	resourceCount.Inc()
 
 	period, err := time.ParseDuration(eWatch.Spec.Frequency)
 	if err != nil {
@@ -203,7 +207,7 @@ func (r *EnvWatcherReconciler) doStuff(ctx context.Context, eWatch *lightwatchv1
 		namespacedName = types.NamespacedName{Name: eWatch.ObjectMeta.Name, Namespace: eWatch.ObjectMeta.Namespace}
 	)
 
-	if data, err = downloadFile(eWatch.Spec.URL); err != nil {
+	if data, err = downloadFile(eWatch.Spec.URL, fmt.Sprintf("%s.%s", eWatch.ObjectMeta.Namespace, eWatch.ObjectMeta.Name)); err != nil {
 		r.Log.Error(err, "failed to download file", "url", eWatch.Spec.URL)
 		return
 	}
@@ -258,6 +262,7 @@ func (r *EnvWatcherReconciler) doStuff(ctx context.Context, eWatch *lightwatchv1
 		if err = r.Update(ctx, cfgMap); err != nil {
 			r.Log.Error(err, "failed to update configmap")
 		}
+		resourceUpdates.With(prometheus.Labels{"resource": fmt.Sprintf("%s:%s", eWatch.ObjectMeta.Namespace, eWatch.ObjectMeta.Name)}).Inc()
 	}
 
 	// So we can keep track of the last version we saw
@@ -269,7 +274,10 @@ func (r *EnvWatcherReconciler) doStuff(ctx context.Context, eWatch *lightwatchv1
 }
 
 // downloadFile downloads a remote file and returns the contents of the file.
-func downloadFile(downloadFile string) (data []byte, err error) {
+func downloadFile(downloadFile string, resourceName string) (data []byte, err error) {
+	timer := prometheus.NewTimer(downloadTimeSecs.With(prometheus.Labels{"resource": resourceName}))
+	defer timer.ObserveDuration()
+
 	if _, err = url.Parse(downloadFile); err != nil {
 		return data, err
 	}
