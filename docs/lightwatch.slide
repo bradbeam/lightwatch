@@ -101,12 +101,20 @@ doStuff Overview:
 .code -numbers ../controllers/envwatcher_controller.go /scanner/,/^\t}/
 .code -numbers ../controllers/envwatcher_controller.go /Generation = eWatch/,/^\t}/
 
+* Metrics
+
+We've added in a couple metrics
+
+.code -numbers ../controllers/envwatcher_controller_metrics.go /SummaryOpts/,/}/
+.code -numbers ../controllers/envwatcher_controller_metrics.go /GaugeOpts/,/}/
+.code -numbers ../controllers/envwatcher_controller_metrics.go /CounterOpts/,/}/
+
 * Enhancements
 
-- Expose additional prometheus metrics
 - Additional debug logging
 - Include remote checksum as part of CRD to validate file contents
 - Set deadline/timeout for file download
+- Add locking to prevent multiple downloads for the same resource from running at the same time
 - Use hashicorp go-getter to support additional protocols (https://github.com/hashicorp/go-getter)
 
 * Considerations
